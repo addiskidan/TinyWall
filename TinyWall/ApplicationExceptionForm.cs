@@ -16,6 +16,7 @@ namespace pylorak.TinyWall
         private List<FirewallExceptionV3> TmpExceptionSettings = new();
         private readonly bool PreserveSettingsOnSubjectChange = false;
         private readonly DarkModeCS? DarkMode;
+        private readonly ContextMenuStrip PathMenu;
 
         internal List<FirewallExceptionV3> ExceptionSettings
         {
@@ -25,6 +26,10 @@ namespace pylorak.TinyWall
         internal ApplicationExceptionForm(FirewallExceptionV3 fwex, bool preserveSettingsOnSubjectChange = false)
         {
             InitializeComponent();
+            components ??= new System.ComponentModel.Container();
+            PathMenu = new ContextMenuStrip(components);
+            PathMenu.Items.Add("Executable...", null, (sender, args) => SelectExecutable());
+            PathMenu.Items.Add("Wildcard path...", null, (sender, args) => SelectWildcard());
             Utils.SetRightToLeft(this);
             if (Utils.IsDarkModeActive(ActiveConfig.Controller))
                 this.DarkMode = new(this) { ColorMode = DarkModeCS.DisplayMode.DarkMode };
@@ -49,6 +54,7 @@ namespace pylorak.TinyWall
             this.Icon = Resources.Icons.firewall;
             this.btnOK.Image = GlobalInstances.ApplyBtnIcon;
             this.btnCancel.Image = GlobalInstances.CancelBtnIcon;
+            this.btnBrowse.Text = "File / wildcard...";
             this.PreserveSettingsOnSubjectChange = preserveSettingsOnSubjectChange;
             this.TmpExceptionSettings.Add(fwex);
 
@@ -128,7 +134,8 @@ namespace pylorak.TinyWall
             // Update top colored banner
             bool hasSignature = false;
             bool validSignature = false;
-            if (exeSubj != null)
+            bool isWildcard = exeSubj != null && ExecutablePathPattern.HasWildcards(exeSubj.ExecutablePath);
+            if (exeSubj != null && !isWildcard)
             {
                 hasSignature = exeSubj.IsSigned;
                 validSignature = exeSubj.CertValid;
@@ -144,7 +151,12 @@ namespace pylorak.TinyWall
                 }
             }
 
-            if (hasSignature && validSignature)
+            if (isWildcard)
+            {
+                panel1.BackgroundImage = Resources.Icons.blue_banner;
+                transparentLabel1.Text = "Wildcard executable path";
+            }
+            else if (hasSignature && validSignature)
             {
                 // Recognized app
                 panel1.BackgroundImage = Resources.Icons.green_banner;
@@ -195,6 +207,7 @@ namespace pylorak.TinyWall
             // Update rule/policy fields
 
             chkInheritToChildren.Checked = TmpExceptionSettings[0].ChildProcessesInherit;
+            chkInheritToChildren.Enabled = true;
 
             switch (TmpExceptionSettings[0].Policy.PolicyType)
             {
@@ -302,6 +315,25 @@ namespace pylorak.TinyWall
 
         private void btnOK_Click(object sender, EventArgs e)
         {
+            if (TmpExceptionSettings[0].Subject is ExecutableSubject executable
+                && ExecutablePathPattern.HasWildcards(executable.ExecutablePath))
+            {
+                try { _ = new ExecutablePathPattern(executable.ExecutablePath); }
+                catch (ArgumentException error)
+                {
+                    MessageBox.Show(this, error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                string warning = radBlock.Checked ? string.Empty
+                    : "This exception also allows matching executables added later. Only allow folders you trust.";
+                if (chkInheritToChildren.Checked)
+                    warning += (warning.Length == 0 ? string.Empty : "\n\n")
+                        + "Child processes will also inherit this policy, including executables outside the selected folder.";
+                if (warning.Length != 0 && MessageBox.Show(this, warning,
+                    Text, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK)
+                    return;
+            }
+
             TmpExceptionSettings[0].ChildProcessesInherit = chkInheritToChildren.Checked;
 
             if (radBlock.Checked)
@@ -372,10 +404,39 @@ namespace pylorak.TinyWall
 
         private void btnBrowse_Click(object sender, EventArgs e)
         {
+            PathMenu.Show(btnBrowse, 0, btnBrowse.Height);
+        }
+
+        private void SelectExecutable()
+        {
             if (ofd.ShowDialog(this) != System.Windows.Forms.DialogResult.OK)
                 return;
 
             ReinitFormFromSubject(new ExecutableSubject(PathMapper.Instance.ConvertPathIgnoreErrors(ofd.FileName, PathFormat.Win32)));
+        }
+
+        private void SelectWildcard()
+        {
+            string initial = TmpExceptionSettings[0].Subject is ExecutableSubject exe
+                && ExecutablePathPattern.HasWildcards(exe.ExecutablePath) ? exe.ExecutablePath : string.Empty;
+            using var picker = new WildcardPathForm(initial);
+            if (picker.ShowDialog(this) != DialogResult.OK) return;
+
+            var exception = CreateWildcardException(TmpExceptionSettings[0], picker.Pattern);
+            TmpExceptionSettings = new List<FirewallExceptionV3> { exception };
+            UpdateUI();
+        }
+
+        private static FirewallExceptionV3 CreateWildcardException(FirewallExceptionV3 previous, string pattern)
+        {
+            // New exceptions have an InvalidSubject that cannot be serialized.
+            var replacement = new FirewallExceptionV3(new ExecutableSubject(pattern), previous.Policy)
+            {
+                Timer = previous.Timer,
+                CreationDate = previous.CreationDate,
+                ChildProcessesInherit = previous.ChildProcessesInherit
+            };
+            return Utils.DeepClone(replacement);
         }
 
         private void btnChooseService_Click(object sender, EventArgs e)

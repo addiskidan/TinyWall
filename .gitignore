@@ -35,3 +35,6 @@
 /MsiSetup/obj/
 /MsiSetup/bin/
 /MsiSetup/Sources/ProgramFiles/
+
+/tests/bin/
+/tests/fixture-*/

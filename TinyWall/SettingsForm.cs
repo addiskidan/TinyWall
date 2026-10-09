@@ -295,7 +295,11 @@ namespace pylorak.TinyWall
 
             if (exeSubj is not null)
             {
-                if (NetworkPath.IsNetworkPath(exeSubj.ExecutablePath))
+                if (ExecutablePathPattern.HasWildcards(exeSubj.ExecutablePath))
+                {
+                    li.ImageIndex = IconList.Images.IndexOfKey("window");
+                }
+                else if (NetworkPath.IsNetworkPath(exeSubj.ExecutablePath))
                 {
                     /* We do not load icons from network drives, to avoid 30s timeout if the drive is unavailable.
                      * If this is ever changed in the future, also remember that .Net's Icon.ExtractAssociatedIcon() 

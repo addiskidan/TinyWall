@@ -60,6 +60,7 @@ namespace pylorak.TinyWall
         private readonly Engine WfpEngine = new("TinyWall Session", "", FWPM_SESSION_FLAGS.None, 5000);
         private readonly ManagementEventWatcher ProcessStartWatcher = new(new WqlEventQuery("SELECT * FROM Win32_ProcessStartTrace"));
         private readonly EventMerger RuleReloadEventMerger = new(1000);
+        private readonly WildcardRuleManager WildcardRules;
 
         private HashSet<IpAddrMask> LocalSubnetAddreses = new();
         private HashSet<IpAddrMask> GatewayAddresses = new();
@@ -169,6 +170,8 @@ namespace pylorak.TinyWall
                 foreach (string appName in ActiveConfig.Service.ActiveProfile.SpecialExceptions)
                     UserExceptions.AddRange(CollectExceptionsForAppByName(appName));
 
+                UserExceptions = WildcardRules.Expand(UserExceptions);
+
                 // Convert exceptions to rules
                 foreach (FirewallExceptionV3 ex in UserExceptions)
                 {
@@ -267,12 +270,8 @@ namespace pylorak.TinyWall
                 }   // if (ChildInheritance ...
             }
 
-            // Convert all paths to kernel-format
-            foreach (var r in rules)
-            {
-                if (r.Application is not null)
-                    r.Application = PathMapper.Instance.ConvertPathIgnoreErrors(r.Application, PathFormat.NativeNt);
-            }
+            if (!needUserRules)
+                WildcardRules.Expand(Array.Empty<FirewallExceptionV3>());
 
             bool displayBlockActive = ActiveConfig.Service.ActiveProfile.DisplayOffBlock && !DisplayCurrentlyOn;
             if (displayBlockActive)
@@ -290,8 +289,18 @@ namespace pylorak.TinyWall
             return rules;
         }
 
+        private static void NormalizeApplicationPaths(IEnumerable<RuleDef> rules)
+        {
+            foreach (var r in rules)
+                if (r.Application is not null)
+                    r.Application = PathMapper.Instance.ConvertPathIgnoreErrors(r.Application, PathFormat.NativeNt);
+        }
+
         private void InstallRules(List<RuleDef> rules, List<RuleDef> rawSocketExceptions, bool useTransaction)
         {
+            // Incremental child rules need the same kernel identities as a full rebuild.
+            NormalizeApplicationPaths(rules);
+            NormalizeApplicationPaths(rawSocketExceptions);
             Transaction? trx = useTransaction ? WfpEngine.BeginTransaction() : null;
             try
             {
@@ -1494,6 +1503,10 @@ namespace pylorak.TinyWall
                         bool save_needed = false;
                         bool rule_reload_needed = false;
 
+                        // Also recover missed file events and roots recreated after an update.
+                        if (WildcardRules.HasMembershipChanged())
+                            rule_reload_needed = true;
+
                         // Event collection might have been disabled by external process or user after we started up,
                         // so re-enable it if that is the case.
                         if (!WfpEngine.CollectNetEvents)
@@ -1640,6 +1653,10 @@ namespace pylorak.TinyWall
 
         public TinyWallServer()
         {
+            WildcardRules = new WildcardRuleManager(
+                () => RuleReloadEventMerger.Pulse(),
+                e => Utils.LogException(e, Utils.LOG_ID_SERVICE));
+
             // Make sure the very-first command is a REINIT
             Q.Add(new TwRequest(TwMessageSimple.CreateRequest(MessageType.REINIT)));
 
@@ -1938,6 +1955,7 @@ namespace pylorak.TinyWall
             if (CommitLearnedRules())
                 ActiveConfig.Service.Save(ConfigSavePath);
 
+            WildcardRules.Dispose();
             RuleReloadEventMerger.Dispose();
             LocalSubnetFilterConditions.Dispose();
             GatewayFilterConditions.Dispose();
